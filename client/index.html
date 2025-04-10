@@ -1,0 +1,84 @@
+<!-- client/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Color Conquest</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Color Conquest</h1>
+      <div id="game-info">
+        <div id="dice-panel" class="hidden">
+          <button id="roll-dice-btn">🎲 Roll Dice</button>
+          <button id="end-turn-btn" class="hidden">✅ End Turn</button>
+
+          <div id="dice-cube" class="hidden">
+            <div class="cube show-1">
+              <div class="face front">1</div>
+              <div class="face back">2</div>
+              <div class="face right">3</div>
+              <div class="face left">4</div>
+              <div class="face top">5</div>
+              <div class="face bottom">6</div>
+            </div>
+          </div>
+
+          <span id="dice-result"></span>
+          <span id="moves-left"></span>
+        </div>
+
+        <div id="player-info">
+          <span id="player-name"></span>
+          <span id="player-color"></span>
+        </div>
+        <div id="turn-info">
+          <span id="current-turn"></span>
+        </div>
+      </div>
+    </header>
+
+    <div class="game-container">
+      <div id="lobby" class="panel">
+        <h2>Game Lobby</h2>
+        <div class="form-group">
+          <label for="player-name-input">Your Name:</label>
+          <input type="text" id="player-name-input" placeholder="Enter your name" />
+        </div>
+        <div class="form-group">
+          <button id="create-game-btn">Create New Game</button>
+        </div>
+        <div class="form-group">
+          <label for="game-id-input">Or Join Existing Game:</label>
+          <input type="text" id="game-id-input" placeholder="Enter Game ID" />
+          <button id="join-game-btn">Join Game</button>
+        </div>
+        <div id="game-id-display"></div>
+      </div>
+
+      <div id="game-board" class="panel hidden">
+        <canvas id="board-canvas"></canvas>
+        <div id="scores-panel">
+          <h3>Scores</h3>
+          <ul id="player-scores"></ul>
+        </div>
+      </div>
+    </div>
+
+    <div id="message-box" class="hidden"></div>
+  </div>
+
+  <canvas id="confetti-canvas" class="hidden"></canvas>
+  <div id="play-again-container" class="hidden">
+    <button id="play-again-btn">🔁 Play Again</button>
+  </div>
+
+  <script src="https://cdn.socket.io/4.4.1/socket.io.min.js"></script>
+  <script src="js/NetworkManager.js"></script>
+  <script src="js/GameBoard.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
