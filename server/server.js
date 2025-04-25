@@ -1,5 +1,4 @@
-// server/server.js (patched)
-
+// server/server.js (RPC compliant)
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -23,104 +22,224 @@ function getNextTurnPlayer(players, currentId) {
   return players[(idx + 1) % players.length].id;
 }
 
+function sendRPC(socket, type, payload) {
+  socket.emit('rpc_response', { type, payload });
+}
+
+function broadcastRPC(room, type, payload) {
+  io.to(room).emit('rpc_response', { type, payload });
+}
+
+function detectCycleUtil(graph, node, visited, stack) {
+  visited[node] = true;
+  stack[node] = true;
+
+  const neighbors = graph[node] || [];
+  for (const neighbor of neighbors) {
+    if (!visited[neighbor] && detectCycleUtil(graph, neighbor, visited, stack)) {
+      return true;
+    } else if (stack[neighbor]) {
+      return true;
+    }
+  }
+
+  stack[node] = false;
+  return false;
+}
+
+function detectDeadlock(waitGraph, gameId) {
+  const visited = {};
+  const stack = {};
+  for (const node in waitGraph) {
+    if (!visited[node]) {
+      if (detectCycleUtil(waitGraph, node, visited, stack)) {
+        console.log('💥 DEADLOCK DETECTED in wait graph!');
+        broadcastRPC(gameId, 'deadlockDetected', { message: '💥 Deadlock detected! Game Stopped.' });
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+
 io.on('connection', (socket) => {
   console.log(`[${new Date().toISOString()}] Client connected: ${socket.id}`);
 
-  socket.on('createGame', ({ playerName }) => {
-    const gameId = Math.random().toString(36).substr(2, 6).toUpperCase();
-    const playerId = socket.id;
-    const playerColor = '#32CD32';
+  socket.on('syncTime', () => {
+    console.log('[SERVER] syncTime triggered');
+    socket.emit('syncTime', { time: Date.now() });
+  });
 
-    games[gameId] = {
-      id: gameId,
-      boardState: {
-        size: 10,
-        board: createEmptyBoard(10),
-        players: [{ id: playerId, name: playerName, color: playerColor, territory: 0 }],
-        currentTurn: playerId
+  socket.on('rpc_request', ({ type, payload }) => {
+    switch (type) {
+      case 'createGame': {
+        const { playerName, boardSize = 10 } = payload;
+        const gameId = Math.random().toString(36).substr(2, 6).toUpperCase();
+        const playerId = socket.id;
+        const playerColor = '#32CD32';
+
+        games[gameId] = {
+          id: gameId,
+          boardState: {
+            size: boardSize,
+            board: createEmptyBoard(boardSize),
+            players: [{ id: playerId, name: playerName, color: playerColor, territory: 0 }],
+            currentTurn: playerId,
+          },
+          locks: {},
+          waitGraph: {}  // Add this to track locked tiles
+        };
+        
+        socket.join(gameId);
+        sendRPC(socket, 'gameCreated', { gameId, playerId, playerColor, boardState: games[gameId].boardState });
+        break;
       }
-    };
 
-    socket.join(gameId);
-    socket.emit('gameCreated', { gameId, playerId, playerColor, boardState: games[gameId].boardState });
-    console.log(`[${new Date().toISOString()}] Game created: ${gameId} by player ${playerId}`);
-  });
+      case 'syncTime': {
+        sendRPC(socket, 'syncTime', { serverTime: Date.now() });
+        break;
+      }
+      
 
-  socket.on('joinGame', ({ gameId, playerName }) => {
-    const game = games[gameId];
-    if (!game) return socket.emit('error', { message: 'Game not found' });
-    if (game.boardState.players.length >= 5) return socket.emit('error', { message: 'Game is full' });
+      case 'joinGame': {
+        const { gameId, playerName } = payload;
+        const game = games[gameId];
+        if (!game) return sendRPC(socket, 'error', { message: 'Game not found' });
+        if (game.boardState.players.length >= 5) return sendRPC(socket, 'error', { message: 'Game is full' });
 
-    const playerId = socket.id;
-    const colorPool = ['#32CD32', '#0080FF', '#FF5733', '#F3FF33', '#FF33F3'];
-    const usedColors = game.boardState.players.map(p => p.color);
-    const availableColors = colorPool.filter(c => !usedColors.includes(c));
-    const playerColor = availableColors[0] || '#000';
+        const playerId = socket.id;
+        const colorPool = ['#32CD32', '#0080FF', '#FF5733', '#F3FF33', '#FF33F3'];
+        const usedColors = game.boardState.players.map(p => p.color);
+        const availableColors = colorPool.filter(c => !usedColors.includes(c));
+        const playerColor = availableColors[0] || '#000';
 
-    game.boardState.players.push({ id: playerId, name: playerName, color: playerColor, territory: 0 });
-    socket.join(gameId);
+        game.boardState.players.push({ id: playerId, name: playerName, color: playerColor, territory: 0 });
+        socket.join(gameId);
 
-    socket.emit('gameJoined', {
-      gameId,
-      playerId,
-      playerColor,
-      boardState: game.boardState
-    });
+        sendRPC(socket, 'gameJoined', { gameId, playerId, playerColor, boardState: game.boardState });
+        socket.to(gameId).emit('rpc_response', {
+          type: 'playerJoined',
+          payload: { playerId, playerName, playerColor }
+        });
 
-    socket.to(gameId).emit('playerJoined', { playerId, playerName, playerColor });
-    console.log(`[${new Date().toISOString()}] Player ${playerId} joined game ${gameId}`);
-  });
+        break;
+      }
 
-  socket.on('claimTile', ({ gameId, x, y, playerId }) => {
-    const game = games[gameId];
-    if (!game) return;
+      case 'claimTile': {
+        const { gameId, x, y, playerId } = payload;
+        const game = games[gameId];
+        if (!game) return;
 
-    const board = game.boardState.board;
-    if (game.boardState.currentTurn !== playerId) return;
-    if (board[y][x] !== null) return;
+        const board = game.boardState.board;
+        if (game.boardState.currentTurn !== playerId || board[y][x] !== null) return;
 
-    const player = game.boardState.players.find(p => p.id === playerId);
-    if (!player) return;
+        const player = game.boardState.players.find(p => p.id === playerId);
+        if (!player) return;
 
-    console.log(`[CLAIM] Player ${playerId} claimed (${x}, ${y})`);
-    console.log(`[CLAIM] CurrentTurn before update: ${game.boardState.currentTurn}`);
+        board[y][x] = player.color;
+        player.territory += 1;
 
-    board[y][x] = player.color;
-    player.territory++;
+        broadcastRPC(gameId, 'boardUpdated', {
+          boardState: game.boardState,
+          claimedTerritories: [{ x, y }]
+        });
 
-    io.in(gameId).emit('boardUpdated', {
-      boardState: game.boardState,
-      claimedTerritories: [{ x, y }]
-    });
+        const boardFull = board.every(row => row.every(cell => cell !== null));
+        if (boardFull) {
+          const scores = game.boardState.players
+            .map(p => ({ id: p.id, name: p.name, color: p.color, territory: p.territory }))
+            .sort((a, b) => b.territory - a.territory);
+          broadcastRPC(gameId, 'gameOver', { scores });
+        }
 
-    const boardFull = board.every(row => row.every(cell => cell !== null));
-    if (boardFull) {
-      const scores = game.boardState.players.map(p => ({
-        id: p.id,
-        name: p.name,
-        color: p.color,
-        territory: p.territory
-      })).sort((a, b) => b.territory - a.territory);
+        break;
+      }
 
-      io.in(gameId).emit('gameOver', { scores });
-      console.log(`Game ${gameId} ended. Final scores:`, scores);
+      case 'nodeMessage': {
+        const { from, to, message, timestamp } = payload;
+        const localTime = new Date(timestamp).toLocaleTimeString();
+      
+        console.log(`[MESSAGE] From ${from} → ${to} | Msg: "${message}" | ⏰ Local Time: ${localTime}`);
+        break;
+      }
+
+      case 'requestLock': {
+        const { gameId, playerId, x, y } = payload;
+        const key = `${x},${y}`;
+        const game = games[gameId];
+        if (!game) return;
+
+        if (!game.locks[key]) {
+          game.locks[key] = playerId;
+          delete game.waitGraph[playerId];
+          sendRPC(socket, 'lockStateUpdated', { locks: game.locks });
+          console.log(`[LOCK GRANTED] ${playerId} locked (${key})`);
+        } else if (game.locks[key] !== playerId) {
+          const currentHolder = game.locks[key];
+          game.waitGraph[playerId] = [...(game.waitGraph[playerId] || []), currentHolder];
+          sendRPC(socket, 'lockDenied', { x, y });
+          console.log(`[BLOCKED] ${playerId} waiting for (${key}) held by ${currentHolder}`);
+          if (detectDeadlock(game.waitGraph, gameId)) {
+            console.log('💥 DEADLOCK DETECTED in game:', gameId);
+          }
+          
+        }
+
+        break;
+      }
+
+      case 'releaseLock': {
+        const { gameId, playerId, x, y } = payload;
+        const key = `${x},${y}`;
+        const game = games[gameId];
+        if (!game) return;
+        if (game.locks[key] === playerId) {
+          delete game.locks[key];
+          sendRPC(socket, 'lockStateUpdated', { locks: game.locks });
+          console.log(`[LOCK RELEASED] ${playerId} released (${key})`);
+        }
+        break;
+      }
+
+      case 'requestCS': {
+        const { gameId, playerId, timestamp } = payload;
+        const game = games[gameId];
+        if (!game) return;
+
+        game.logicalClocks[playerId] = Math.max(game.logicalClocks[playerId], timestamp);
+        game.requestQueue.push({ playerId, timestamp });
+        game.requestQueue.sort((a, b) => a.timestamp - b.timestamp || a.playerId.localeCompare(b.playerId));
+
+        for (const player of game.boardState.players) {
+          if (player.id !== playerId) {
+            const target = io.sockets.sockets.get(player.id);
+            if (target) sendRPC(target, 'ackCS', { from: playerId, to: player.id, timestamp });
+          }
+        }
+        break;
+      }
+
+      case 'releaseCS': {
+        const { gameId, playerId } = payload;
+        const game = games[gameId];
+        if (!game) return;
+        game.requestQueue = game.requestQueue.filter(r => r.playerId !== playerId);
+        break;
+      }
+      
+      
+
+      case 'endTurn': {
+        const { gameId, playerId } = payload;
+        const game = games[gameId];
+        if (!game || game.boardState.currentTurn !== playerId) return;
+
+        game.boardState.currentTurn = getNextTurnPlayer(game.boardState.players, playerId);
+        broadcastRPC(gameId, 'boardUpdated', { boardState: game.boardState });
+        break;
+      }
     }
-  });
-
-  socket.on('endTurn', ({ gameId, playerId }) => {
-    const game = games[gameId];
-    if (!game) return;
-    if (game.boardState.currentTurn !== playerId) return;
-
-    console.log(`[SERVER] endTurn from ${playerId} for game ${gameId}`);
-    console.log(`[TURN] CurrentTurn before rotate: ${game.boardState.currentTurn}`);
-
-    game.boardState.currentTurn = getNextTurnPlayer(game.boardState.players, playerId);
-    console.log(`[TURN] Next turn set to: ${game.boardState.currentTurn}`);
-
-    io.in(gameId).emit('boardUpdated', {
-      boardState: game.boardState
-    });
   });
 
   socket.on('disconnect', () => {
@@ -130,7 +249,7 @@ io.on('connection', (socket) => {
       const index = game.boardState.players.findIndex(p => p.id === socket.id);
       if (index !== -1) {
         game.boardState.players.splice(index, 1);
-        io.in(gameId).emit('playerLeft', { playerId: socket.id });
+        broadcastRPC(gameId, 'playerLeft', { playerId: socket.id });
 
         if (game.boardState.players.length === 1) {
           const last = game.boardState.players[0];
@@ -140,8 +259,7 @@ io.on('connection', (socket) => {
             color: last.color,
             territory: last.territory
           }];
-          io.in(gameId).emit('gameOver', { scores });
-          console.log(`Game ${gameId} ended — ${last.name} wins by survival`);
+          broadcastRPC(gameId, 'gameOver', { scores });
           delete games[gameId];
         }
         break;

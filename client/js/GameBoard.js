@@ -64,6 +64,8 @@ class GameBoard {
     const y = Math.floor((event.clientY - rect.top) / this.tileSize);
   
     if (x >= 0 && x < this.size && y >= 0 && y < this.size && this.tiles[y][x] === null) {
+      console.log(`[CLICK] Requesting lock for (${x},${y})`);
+
       this.networkManager.placeTile(this.gameId, x, y);
       window.movesLeft -= 1;
       const moveText = ` | Moves Left: ${window.movesLeft}`;
@@ -184,4 +186,3 @@ class GameBoard {
     return `rgb(${r}, ${g}, ${b})`;
   }
 }
-

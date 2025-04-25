@@ -19,7 +19,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
   window.movesLeft = 0;
   const networkManager = new NetworkManager('http://localhost:3000');
+  networkManager.onSyncTime = ({ serverTime }) => {
+    const clientNow = Date.now();
+    const offsetMs = serverTime - clientNow;
+    const offsetSeconds = (offsetMs / 1000).toFixed(3);
+    const sign = offsetMs >= 0 ? '+' : '-';
+  
+    document.getElementById('server-time-indicator').textContent =
+      `🕒 Clock Offset: ${sign}${Math.abs(offsetSeconds)}s`;
+  };
+  
+  console.log('[SYNC REQUESTED]');
+  networkManager.send('syncTime');
+  
+  
   let gameBoard = null;
+  let diceTimeout;
+  let moveTimeout;
+  
+
+
 
   let gameState = {
     gameId: null,
@@ -101,13 +120,39 @@ document.addEventListener('DOMContentLoaded', () => {
     updateTurnInfo(data.boardState.currentTurn);
   };
 
+  // 🌐 Simulate random inter-node messages (Distributed System)
+/*setInterval(() => {
+  const others = gameState.players.filter(p => p.id !== gameState.playerId);
+  if (!others.length) return;
+
+  const to = others[Math.floor(Math.random() * others.length)].id;
+  const from = gameState.playerId;
+  const timestamp = Date.now();
+
+  const messages = [
+    'rolled dice 🎲',
+    'placed a tile 🧱',
+    'ended their turn ✅',
+    'claimed a territory 🌍',
+    'is strategizing 🤔'
+  ];
+  const message = messages[Math.floor(Math.random() * messages.length)];
+
+  networkManager.send('nodeMessage', { from, to, message, timestamp });
+}, Math.random() * 6000 + 4000);*/
+
+
+
   networkManager.onPlayerJoined = (data) => {
+    const exists = gameState.players.some(p => p.id === data.playerId);
+  if (!exists) {
     gameState.players.push({
       id: data.playerId,
       name: data.playerName,
       color: data.playerColor,
       territory: 0
     });
+  }
 
     updateScores(gameState.players);
     showMessage(`${data.playerName} joined the game`, 'info');
@@ -132,12 +177,29 @@ document.addEventListener('DOMContentLoaded', () => {
   networkManager.onBoardUpdated = (data) => {
     gameBoard.updateBoard(data.boardState);
     updateScores(data.boardState.players);
+  
+    const isMyTurn = data.boardState.currentTurn === gameState.playerId;
+    const canMove = isMyTurn && window.movesLeft > 0;
+    if (gameBoard?.setInteractive) gameBoard.setInteractive(canMove);
     updateTurnInfo(data.boardState.currentTurn);
-
-    if (data.claimedTerritories && data.claimedTerritories.length > 0) {
+  
+    clearTimeout(diceTimeout);
+    if (isMyTurn && window.movesLeft === 0) {
+      diceTimeout = setTimeout(() => {
+        showMessage("⏰ You didn’t roll dice in time. Turn passed.", "warning");
+        if (gameBoard?.setInteractive) gameBoard.setInteractive(false);
+        networkManager.endTurn(gameState.gameId, gameState.playerId, () => {});
+      }, 10000);
+    }
+  
+    if (data.claimedTerritories?.length) {
       gameBoard.highlightTerritory(data.claimedTerritories);
     }
   };
+  
+  
+  
+  
 
   networkManager.onPlayerLeft = (data) => {
     gameState.players = gameState.players.filter(p => p.id !== data.playerId);
@@ -151,27 +213,61 @@ document.addEventListener('DOMContentLoaded', () => {
     gameBoard.setInteractive(false);
   };
 
+  networkManager.onLockStateUpdated = ({ locks }) => {
+    for (const key in locks) {
+      if (locks[key] === gameState.playerId) {
+        console.log(`[✅ LOCK GRANTED] ${gameState.playerId} holds ${key}`);
+        const [x, y] = key.split(',').map(Number);
+        networkManager.placeTile(gameState.gameId, x, y);
+      }
+    }
+  };
+  
+  
+  networkManager.onLockDenied = ({ x, y }) => {
+    console.log(`[BLOCKED] Lock denied at (${x},${y}) for ${gameState.playerId} – Possible deadlock wait`);
+  };
+
+  networkManager.socket.on('rpc_response', ({ type, payload }) => {
+    if (type === 'deadlockDetected') {
+      alert(payload.message || '💥 Deadlock Detected! Game Over!');
+      if (gameBoard) {
+        gameBoard.setInteractive(false);
+      }
+      document.getElementById('moves-left').textContent = ' | Deadlock!';
+    }
+  });
+
+  
+
   networkManager.onError = (error) => {
     showMessage(error.message, 'error');
   };
+  
 
   rollBtn.addEventListener('click', () => {
+    clearTimeout(diceTimeout);
+    clearTimeout(moveTimeout); // ← ADD THIS
+  
     const roll = Math.floor(Math.random() * 6) + 1;
     document.getElementById('dice-result').textContent = `You rolled a ${roll}`;
     window.movesLeft = roll;
     document.getElementById('moves-left').textContent = ` | Moves Left: ${window.movesLeft}`;
-
+  
     if (gameBoard && gameState.playerId === gameBoard.currentTurn) {
-      gameBoard.interactive = true;
+      if (gameBoard?.setInteractive) gameBoard.setInteractive(true);
       gameBoard.render();
     }
+  
+    clearTimeout(moveTimeout);
+    moveTimeout = setTimeout(() => {
+      showMessage("⏰ You didn't make a move. Turn skipped.", 'warning');
+      if (gameBoard?.setInteractive) gameBoard.setInteractive(false);
+      networkManager.endTurn(gameState.gameId, gameState.playerId, () => {});
+    }, 10000);
   });
-
-  endTurnBtn.addEventListener('click', () => {
-    window.movesLeft = 0;
-    document.getElementById('moves-left').textContent = ' | Turn Ended';
-    endTurnBtn.classList.add('hidden');
-  });
+  
+  
 
   function updateScores(players) {
     const scoresList = document.getElementById('player-scores');
@@ -210,7 +306,7 @@ document.addEventListener('DOMContentLoaded', () => {
       endTurn.classList.add('hidden');
 
       if (gameBoard) {
-        gameBoard.interactive = true;
+        if (gameBoard?.setInteractive) gameBoard.setInteractive(true);
         gameBoard.render();
       }
     } else {
@@ -219,6 +315,7 @@ document.addEventListener('DOMContentLoaded', () => {
       endTurn.classList.add('hidden');
     }
   }
+
 
   function showMessage(message, type = 'error') {
     messageBox.textContent = message;
